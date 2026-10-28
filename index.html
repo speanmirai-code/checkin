@@ -117,7 +117,8 @@ const TRIES = 3;
 
 const $ = id => document.getElementById(id);
 const tg = window.Telegram && window.Telegram.WebApp;
-const inTelegram = !!(tg && tg.initData);
+// キーボードのボタンから開いた場合 initData は空なので、platform で判定する
+const inTelegram = !!(tg && ((tg.platform && tg.platform !== 'unknown') || tg.initData));
 const q = new URLSearchParams(location.search);
 const demo = q.has('demo');
 const mode = q.get('m');               // 'in' | 'out' | null
