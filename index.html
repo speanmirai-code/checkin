@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="robots" content="noindex">
+<title>Work Check-in</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c2733);
+    --hint: var(--tg-theme-hint-color, #6b7785);
+    --line: rgba(127, 140, 153, .25);
+    --ok: #1f9d4c;
+    --ok-soft: rgba(31, 157, 76, .12);
+    --warn: #c77700;
+    --warn-soft: rgba(199, 119, 0, .12);
+    --bad: #d93838;
+    --bad-soft: rgba(217, 56, 56, .1);
+    --blue: var(--tg-theme-button-color, #2a8bd8);
+    --blue-text: var(--tg-theme-button-text-color, #ffffff);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Noto Sans Khmer", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { min-height: 100%; max-width: 480px; margin: 0 auto; padding: 18px 18px 22px; display: flex; flex-direction: column; gap: 14px; }
+  .who { font-size: 13px; color: var(--hint); }
+  .card { border: 1px solid var(--line); border-radius: 14px; padding: 13px 15px; }
+  .lbl { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--hint); }
+  .pname { font-size: 19px; font-weight: 700; margin: 2px 0; overflow-wrap: anywhere; }
+  .time { font-size: 14px; color: var(--hint); }
+  .gps { display: flex; align-items: center; gap: 12px; border-radius: 14px; padding: 13px 15px; background: var(--line); }
+  .gps b { display: block; font-size: 15px; }
+  .gps small { display: block; font-size: 12.5px; color: var(--hint); }
+  .dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--hint); }
+  .gps.searching .dot { animation: pulse 1s ease-in-out infinite; background: var(--blue); }
+  .gps.ok { background: var(--ok-soft); } .gps.ok .dot { background: var(--ok); box-shadow: 0 0 0 5px var(--ok-soft); }
+  .gps.weak { background: var(--warn-soft); } .gps.weak .dot { background: var(--warn); }
+  .gps.fail { background: var(--bad-soft); } .gps.fail .dot { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .dist { font-size: 14px; font-weight: 600; min-height: 20px; }
+  .dist.ok { color: var(--ok); } .dist.far { color: var(--warn); }
+  .grow { flex: 1; }
+  button { font: inherit; border: 0; border-radius: 14px; width: 100%; padding: 16px; font-size: 17px; font-weight: 700; cursor: pointer; }
+  button[disabled] { opacity: .4; cursor: default; }
+  #go { background: var(--ok); color: #fff; }
+  #go.out { background: var(--blue); color: var(--blue-text); }
+  #retry { background: var(--line); color: var(--text); font-size: 15px; padding: 13px; }
+  #backup { background: none; color: var(--hint); font-size: 13.5px; font-weight: 500; padding: 6px; text-decoration: underline; }
+  .note { font-size: 12px; color: var(--hint); text-align: center; }
+  .notice { border-radius: 14px; padding: 16px; background: var(--warn-soft); font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="who" id="who"></div>
+
+  <section class="card" id="visit" hidden>
+    <div class="lbl" id="visitLbl"></div>
+    <div class="pname" id="pname"></div>
+    <div class="time" id="ptime"></div>
+  </section>
+
+  <section class="gps searching" id="gps">
+    <span class="dot"></span>
+    <div><b id="gpsTitle"></b><small id="gpsSub"></small></div>
+  </section>
+  <div class="dist" id="dist"></div>
+
+  <div class="notice" id="outside" hidden></div>
+
+  <div class="grow"></div>
+  <button id="go" disabled></button>
+  <button id="retry" hidden></button>
+  <button id="backup" hidden></button>
+  <p class="note" id="note"></p>
+</main>
+
+<script>
+/* ===== 表示する文言（クメール語にする場合はここだけ書き換え） ===== */
+const T = {
+  nextVisit: 'Next visit',
+  currentVisit: 'Current visit',
+  noVisit: 'No more visits scheduled today',
+  searching: 'Getting GPS location…',
+  searchingSub: 'Please wait a few seconds',
+  found: 'GPS location found',
+  weak: 'GPS signal is weak',
+  accuracy: a => (a == null ? 'Accuracy unknown' : 'Accuracy ± ' + a + ' m'),
+  weakSub: a => 'Accuracy ± ' + a + ' m — move near a window or outside and tap Retry',
+  failTitle: 'Could not get your location',
+  failDenied: 'Location permission is off for Telegram.',
+  failOff: 'Turn on Location (GPS) on your phone, then tap Retry.',
+  failNoFix: 'No GPS signal. Move near a window or outside, then tap Retry.',
+  distOk: m => '✓ ' + fmtDist(m) + ' from the patient\'s home',
+  distFar: m => '⚠ ' + fmtDist(m) + ' from the patient\'s home',
+  checkIn: '✅ Check in',
+  checkOut: '🏁 Check out',
+  send: '📍 Send my location',
+  sending: 'Sending…',
+  retry: '↻ Retry',
+  openSettings: 'Open settings',
+  backup: 'Still not working? Use the backup method',
+  note: 'Your location is read directly from this phone\'s GPS.',
+  outside: 'Please open this from the "📍 Check-in / Check-out" button in the Telegram bot.',
+};
+
+const GOOD_ACC = 50;     // これ以下(m)なら1回で確定
+const WEAK_ACC = 150;    // これより悪い(m)と「弱い」表示（送信はできる）
+const TRIES = 3;
+
+const $ = id => document.getElementById(id);
+const tg = window.Telegram && window.Telegram.WebApp;
+const inTelegram = !!(tg && tg.initData);
+const q = new URLSearchParams(location.search);
+const demo = q.has('demo');
+const mode = q.get('m');               // 'in' | 'out' | null
+const radius = Number(q.get('r')) || 150;
+let fix = null, lastErr = null, busy = false;
+
+function fmtDist(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km'; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function todayLocal() {
+  const d = new Date(Date.now() + 7 * 3600 * 1000);   // カンボジア時間
+  return d.toISOString().slice(0, 10);
+}
+function distM(a, b, c, d) {
+  const R = 6371000, r = x => x * Math.PI / 180;
+  const h = Math.sin(r(c - a) / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(r(d - b) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+/* ---------- 画面の初期表示 ---------- */
+const sameDay = !q.get('d') || q.get('d') === todayLocal();   // 昨日のボタンの情報は表示しない
+function initView() {
+  if (q.get('n')) $('who').textContent = q.get('n');
+  if (mode === 'out' || (q.get('p') && sameDay)) {
+    $('visit').hidden = false;
+    $('visitLbl').textContent = mode === 'out' ? T.currentVisit : T.nextVisit;
+    $('pname').textContent = q.get('p') || '';
+    $('ptime').textContent = (q.get('t') || '').replace('-', ' – ');
+  } else if (mode === 'in' && sameDay) {
+    $('visit').hidden = false;
+    $('visitLbl').textContent = T.nextVisit;
+    $('pname').textContent = T.noVisit;
+  }
+  const go = $('go');
+  go.textContent = mode === 'out' ? T.checkOut : mode === 'in' ? T.checkIn : T.send;
+  if (mode === 'out') go.classList.add('out');
+  $('retry').textContent = T.retry;
+  $('backup').textContent = T.backup;
+  $('note').textContent = T.note;
+}
+
+function setGps(state, title, sub) {
+  $('gps').className = 'gps ' + state;
+  $('gpsTitle').textContent = title;
+  $('gpsSub').textContent = sub || '';
+}
+
+/* ---------- 位置の取得 ---------- */
+// Telegram の LocationManager（Bot API 8.0 以降）を優先。使えない時はブラウザのGPS
+function viaTelegram() {
+  return new Promise((resolve, reject) => {
+    const lm = tg.LocationManager;
+    const run = () => {
+      if (!lm.isLocationAvailable) return reject('off');
+      if (lm.isAccessRequested && !lm.isAccessGranted) return reject('denied');
+      lm.getLocation(d => {
+        if (d) resolve({ lat: d.latitude, lng: d.longitude, acc: d.horizontal_accuracy, src: 'tg' });
+        else reject(lm.isAccessGranted ? 'nofix' : 'denied');
+      });
+    };
+    lm.isInited ? run() : lm.init(run);
+  });
+}
+function viaBrowser() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject('off');
+    navigator.geolocation.getCurrentPosition(
+      p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy, src: 'web' }),
+      e => reject(e.code === 1 ? 'denied' : 'nofix'),
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  });
+}
+function getOnce() {
+  const canTg = tg && tg.LocationManager && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0');
+  if (canTg) return viaTelegram().catch(e => (e === 'off' ? viaBrowser() : Promise.reject(e)));
+  return viaBrowser();
+}
+
+async function locate() {
+  if (busy) return;
+  busy = true;
+  fix = null; lastErr = null;
+  $('go').disabled = true; $('retry').hidden = true;
+  $('dist').textContent = ''; $('dist').className = 'dist';
+  setGps('searching', T.searching, T.searchingSub);
+
+  for (let i = 0; i < TRIES; i++) {
+    try {
+      const r = await getOnce();
+      if (r.acc != null) r.acc = Math.round(r.acc);
+      if (!fix || (r.acc != null && (fix.acc == null || r.acc < fix.acc))) fix = r;
+      if (fix.acc != null && fix.acc <= GOOD_ACC) break;
+    } catch (e) {
+      lastErr = String(e);
+      if (lastErr === 'denied' || lastErr === 'off') break;
+    }
+    if (i < TRIES - 1) await sleep(1500);
+  }
+  busy = false;
+  showResult();
+}
+
+function showResult() {
+  const go = $('go'), retry = $('retry');
+  if (!fix) {
+    const sub = lastErr === 'denied' ? T.failDenied : lastErr === 'off' ? T.failOff : T.failNoFix;
+    setGps('fail', T.failTitle, sub);
+    retry.hidden = false;
+    retry.textContent = (lastErr === 'denied' && tg && tg.LocationManager && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) ? T.openSettings : T.retry;
+    $('backup').hidden = !inTelegram;
+    return;
+  }
+  if (fix.acc != null && fix.acc > WEAK_ACC) {
+    setGps('weak', T.weak, T.weakSub(fix.acc));
+    retry.hidden = false; retry.textContent = T.retry;
+  } else {
+    setGps('ok', T.found, T.accuracy(fix.acc));
+  }
+  const la = Number(q.get('la')), lo = Number(q.get('lo'));
+  if (sameDay && q.get('la') && q.get('lo') && isFinite(la) && isFinite(lo)) {
+    const m = distM(fix.lat, fix.lng, la, lo);
+    $('dist').textContent = m <= radius ? T.distOk(m) : T.distFar(m);
+    $('dist').className = 'dist ' + (m <= radius ? 'ok' : 'far');
+  }
+  go.disabled = false;
+}
+
+/* ---------- 送信 ---------- */
+function send(payload) {
+  const data = JSON.stringify(Object.assign({ v: 1 }, payload));
+  if (inTelegram) {
+    tg.sendData(data);              // ボットに届き、ミニアプリは自動で閉じる
+  } else {
+    window.__sent = data;           // ブラウザでの確認用（?demo）
+    $('note').textContent = 'DEMO — would send: ' + data;
+  }
+}
+
+$('go').addEventListener('click', () => {
+  if (!fix) return;
+  $('go').disabled = true;
+  $('go').textContent = T.sending;
+  if (tg && tg.HapticFeedback) try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
+  send({ lat: +fix.lat.toFixed(6), lng: +fix.lng.toFixed(6), acc: fix.acc == null ? null : fix.acc, src: fix.src });
+});
+
+$('retry').addEventListener('click', () => {
+  if (lastErr === 'denied' && !fix && tg && tg.LocationManager && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+    tg.LocationManager.openSettings();
+    lastErr = 'settings';              // 設定から戻ったら「Retry」で取り直す
+    $('retry').textContent = T.retry;
+    return;
+  }
+  locate();
+});
+
+$('backup').addEventListener('click', () => send({ err: lastErr || 'unknown' }));
+
+/* ---------- 起動 ---------- */
+initView();
+if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+if (!inTelegram && !demo) {
+  setGps('fail', T.failTitle, '');
+  $('gps').hidden = true;
+  $('outside').hidden = false;
+  $('outside').textContent = T.outside;
+  $('go').hidden = true;
+  $('note').hidden = true;
+} else {
+  locate();
+}
+</script>
+</body>
+</html>
