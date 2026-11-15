@@ -119,6 +119,9 @@ const T = {
   noVisit: 'No more visits scheduled today',
   searching: 'Getting GPS location…',
   searchingSub: 'Please wait a few seconds',
+  recheck: 'Checking GPS again…',
+  recheckSub: s => 'Your phone may show an old location. Please wait (' + s + ' s)',
+  farTip: 'Are you at the home? Open Google Maps once, then come back and tap Retry.',
   found: 'GPS location found',
   weak: 'GPS signal is weak',
   accuracy: a => (a == null ? 'Accuracy unknown' : 'Accuracy ± ' + a + ' m'),
@@ -150,6 +153,9 @@ const DONE_MS = 1800;    // 「お疲れ様」などを見せてから送信す�
 const GOOD_ACC = 50;     // これ以下(m)なら1回で確定
 const WEAK_ACC = 150;    // これより悪い(m)と「弱い」表示（送信はできる）
 const TRIES = 3;
+const RECHECK_MS = 20000; // 患者宅から遠い時、新しい位置を待つ時間
+const MOVED_M = 30;       // これ以上動いたら「位置が更新された」とみる
+let rechecked = false;
 
 const $ = id => document.getElementById(id);
 const tg = window.Telegram && window.Telegram.WebApp;
@@ -245,25 +251,84 @@ function getOnce() {
   return viaBrowser();
 }
 
+// 患者宅（ボタンに入っている座標）。無い時は null
+function target() {
+  const la = Number(q.get('la')), lo = Number(q.get('lo'));
+  if (!sameDay || !q.get('la') || !q.get('lo') || !isFinite(la) || !isFinite(lo)) return null;
+  return { la, lo };
+}
+function distTo(r) { const t = target(); return t ? distM(r.lat, r.lng, t.la, t.lo) : null; }
+function norm(r) { if (r.acc != null) r.acc = Math.round(r.acc); return r; }
+
+// スマホが「古い位置」を返すことがある（精度の数字は良いまま）。
+// 患者宅から遠い時は、GPSを動かし続けて新しい位置が出るまで少し待つ。
+function recheck(first) {
+  return new Promise(resolve => {
+    let done = false, watchId = null, best = null, last = first;
+    const t0 = Date.now();
+    const finish = () => {
+      if (done) return; done = true;
+      if (watchId != null) try { navigator.geolocation.clearWatch(watchId); } catch (e) {}
+      resolve(best || last);
+    };
+    const take = r => {
+      if (done || !r) return;
+      norm(r);
+      if (r.acc != null && r.acc > WEAK_ACC) return;            // 粗すぎる位置は使わない
+      const moved = distM(r.lat, r.lng, first.lat, first.lng);
+      if (moved > MOVED_M) last = r;                              // 位置が更新された
+      const d = distTo(r);
+      if (d != null && d <= radius) { best = r; finish(); }       // 患者宅の近くが出た → 確定
+    };
+    // ブラウザのGPSを動かし続ける（スマホに測り直させる）。使えない時は何もしない
+    try {
+      if (navigator.geolocation) watchId = navigator.geolocation.watchPosition(
+        p => take({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy, src: 'web' }),
+        () => {}, { enableHighAccuracy: true, timeout: RECHECK_MS, maximumAge: 0 });
+    } catch (e) {}
+    (async () => {
+      while (!done && Date.now() - t0 < RECHECK_MS) {
+        await sleep(2000);
+        if (done) break;
+        const left = Math.max(0, Math.ceil((RECHECK_MS - (Date.now() - t0)) / 1000));
+        setGps('searching', T.recheck, T.recheckSub(left));
+        try { take(await getOnce()); } catch (e) {}
+      }
+      finish();
+    })();
+  });
+}
+
 async function locate() {
   if (busy) return;
   busy = true;
-  fix = null; lastErr = null;
+  fix = null; lastErr = null; rechecked = false;
   $('go').disabled = true; $('retry').hidden = true;
   $('dist').textContent = ''; $('dist').className = 'dist';
   setGps('searching', T.searching, T.searchingSub);
 
   for (let i = 0; i < TRIES; i++) {
     try {
-      const r = await getOnce();
-      if (r.acc != null) r.acc = Math.round(r.acc);
-      if (!fix || (r.acc != null && (fix.acc == null || r.acc < fix.acc))) fix = r;
-      if (fix.acc != null && fix.acc <= GOOD_ACC) break;
+      const r = norm(await getOnce());
+      // 同じくらいの精度なら新しい方を使う
+      if (!fix || r.acc == null || fix.acc == null || r.acc <= fix.acc + 10) fix = r;
+      const d = distTo(fix);
+      const good = fix.acc != null && fix.acc <= GOOD_ACC;
+      if (good && (d == null ? i >= 1 : d <= radius)) break;      // 近くて精度も良い → 確定
+      if (good && d != null && d > radius) break;                 // 遠い → 下の取り直しへ
     } catch (e) {
       lastErr = String(e);
       if (lastErr === 'denied' || lastErr === 'off') break;
     }
     if (i < TRIES - 1) await sleep(1500);
+  }
+  if (fix) {
+    const d = distTo(fix);
+    if (d != null && d > radius) {
+      setGps('searching', T.recheck, T.recheckSub(Math.round(RECHECK_MS / 1000)));
+      fix = await recheck(fix);
+      rechecked = true;
+    }
   }
   busy = false;
   showResult();
@@ -286,11 +351,14 @@ function showResult() {
   } else {
     setGps('ok', T.found, T.accuracy(fix.acc));
   }
-  const la = Number(q.get('la')), lo = Number(q.get('lo'));
-  if (sameDay && q.get('la') && q.get('lo') && isFinite(la) && isFinite(lo)) {
-    const m = distM(fix.lat, fix.lng, la, lo);
+  const m = distTo(fix);
+  if (m != null) {
     $('dist').textContent = m <= radius ? T.distOk(m) : T.distFar(m);
     $('dist').className = 'dist ' + (m <= radius ? 'ok' : 'far');
+    if (m > radius) {                 // 遠いまま：送れるが、取り直しもできる
+      $('gpsSub').textContent = T.farTip;
+      retry.hidden = false; retry.textContent = T.retry;
+    }
   }
   go.disabled = false;
 }
